@@ -146,9 +146,12 @@ def growth_chart(returns: pd.Series, name: str, benchmark_returns: Optional[pd.S
     return make_chart_image(fig, height_mm=65)
 
 
-def drawdown_chart(nav: pd.Series, name: str) -> Image:
-    rolling_max = nav.cummax()
-    dd = nav / rolling_max - 1
+def drawdown_chart(returns: pd.Series, name: str) -> Image:
+    """Drawdown of the TWR growth-of-₹1 curve — never raw NAV, so a client
+    withdrawal never shows up as a fake loss."""
+    cumret = (1 + returns).cumprod()
+    rolling_max = cumret.cummax()
+    dd = cumret / rolling_max - 1
     fig, ax = plt.subplots(figsize=(9, 2.8))
     ax.fill_between(dd.index, dd.values, 0, color="#C0392B", alpha=0.5)
     ax.plot(dd.index, dd.values, color="#C0392B", linewidth=0.8)
@@ -331,14 +334,14 @@ def summary_text(
     *,
     portfolio_name: str,
     stats_row: Optional[pd.Series],
-    nav: pd.Series,
+    returns: pd.Series,
     winners: Optional[pd.Series],
     laggards: Optional[pd.Series],
 ) -> str:
-    nav = nav.dropna()
-    start = nav.index.min().date().isoformat() if not nav.empty else "N/A"
-    end = nav.index.max().date().isoformat() if not nav.empty else "N/A"
-    total_ret = (nav.iloc[-1] / nav.iloc[0] - 1) if len(nav) >= 2 else np.nan
+    r = pd.to_numeric(returns, errors="coerce").dropna()
+    start = r.index.min().date().isoformat() if not r.empty else "N/A"
+    end = r.index.max().date().isoformat() if not r.empty else "N/A"
+    total_ret = float((1 + r).prod() - 1) if len(r) >= 1 else np.nan
 
     ann = stats_row.get("Annualized Return") if stats_row is not None else np.nan
     vol = stats_row.get("Annualized Volatility") if stats_row is not None else np.nan
@@ -376,7 +379,7 @@ def summary_text(
 
     parts = [
         f"This report summarises {portfolio_name}'s equity portfolio performance from {start} to {end}.",
-        f"Over the period, portfolio NAV returned {_pct(total_ret)}.",
+        f"Over the period, the portfolio returned {_pct(total_ret)}.",
         f"Annualised return: {_pct(ann)}; annualised volatility: {_pct(vol)}; Sharpe: {_flt(sharpe)}; Sortino: {_flt(sortino)}; "
         f"Beta (Nifty 500): {_flt(beta)}; Jensen's alpha: {_pct(alpha)}; 99% daily CVaR: {_pct(var99)}; max drawdown: {_pct(mdd)}.",
     ]
@@ -416,7 +419,6 @@ def generate_portfolio_pdf_bytes(
     *,
     portfolio_name: str,
     report_date: date | datetime,
-    nav: pd.Series,
     returns: pd.Series,
     holdings: pd.DataFrame,
     prices: pd.DataFrame,
@@ -495,7 +497,7 @@ def generate_portfolio_pdf_bytes(
             summary_text(
                 portfolio_name=str(portfolio_name),
                 stats_row=stats_row,
-                nav=nav,
+                returns=returns,
                 winners=winners,
                 laggards=laggards,
             ),
@@ -546,7 +548,7 @@ def generate_portfolio_pdf_bytes(
     story.append(Spacer(1, 4 * mm))
     story.append(growth_chart(returns.dropna(), str(portfolio_name), benchmark_returns=benchmark_returns))
     story.append(Spacer(1, 6 * mm))
-    story.append(drawdown_chart(nav.dropna(), str(portfolio_name)))
+    story.append(drawdown_chart(returns.dropna(), str(portfolio_name)))
 
     story.append(PageBreak())
 
