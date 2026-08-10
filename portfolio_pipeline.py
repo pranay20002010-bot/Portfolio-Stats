@@ -10,6 +10,8 @@ import pandas as pd
 
 
 REQUIRED_COLUMNS = {"portfolio", "date", "ticker", "action", "quantity", "price"}
+REQUIRED_HOLDINGS_COLUMNS = {"portfolio", "startdate", "ticker", "quantity", "avgcostprice"}
+REQUIRED_CASHFLOW_COLUMNS = {"portfolio", "date", "amount"}
 
 # Shared correlation heatmap colormap: green(-1) → yellow(0) → red(+1)
 # Import matplotlib.colors lazily to avoid hard dependency at module load time.
@@ -125,9 +127,48 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_transactions_excel(excel_bytes: bytes, password: Optional[str] = None) -> pd.DataFrame:
+def _normalize_columns_basic(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lowercase/strip column names only — no alias remapping.
+
+    Used for sheets (like Cashflows) whose columns must NOT go through the
+    transaction-sheet alias map, since that map redirects "amount" -> "price"
+    (meant for transaction sheets that call the trade value "Amount"), which
+    would otherwise silently destroy the Cashflows "Amount" column.
+    """
+    df = df.copy()
+    df = df.rename(columns={col: str(col).strip().lower() for col in df.columns})
+    return df
+
+
+def _find_sheet(sheets: dict[str, pd.DataFrame], *names: str) -> pd.DataFrame:
+    """Case/whitespace-insensitive lookup of a worksheet by name."""
+    lookup = {str(k).strip().lower(): k for k in sheets.keys()}
+    for name in names:
+        key = name.strip().lower()
+        if key in lookup:
+            return sheets[lookup[key]]
+    raise TransactionsFormatError(
+        f"Could not find a sheet named one of {list(names)}. "
+        f"Found sheets: {list(sheets.keys())}"
+    )
+
+
+def load_transactions_excel(excel_bytes: bytes, password: Optional[str] = None) -> dict[str, pd.DataFrame]:
+    """
+    Load the full workbook (all sheets) as a dict {sheet_name: DataFrame}.
+
+    The transactions master file has three sheets:
+      - "Initial Holdings": positions each portfolio held before the tracked
+        transaction history begins.
+      - "Cashflows": deposits/withdrawals per portfolio.
+      - "Transactions": the buy/sell trade log.
+    """
+    def _read(bio: io.BytesIO) -> dict[str, pd.DataFrame]:
+        return pd.read_excel(bio, sheet_name=None)
+
     try:
-        return pd.read_excel(io.BytesIO(excel_bytes))
+        return _read(io.BytesIO(excel_bytes))
     except Exception:
         if not password:
             raise
@@ -139,43 +180,107 @@ def load_transactions_excel(excel_bytes: bytes, password: Optional[str] = None) 
     office_file.load_key(password=password)
     office_file.decrypt(decrypted)
     decrypted.seek(0)
-    return pd.read_excel(decrypted)
+    return _read(decrypted)
 
 
-def prepare_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
-    df = _normalize_columns(df_raw)
+def prepare_transactions(sheets: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build the working transactions DataFrame and a separate cashflows DataFrame
+    from the raw workbook sheets.
 
-    missing = REQUIRED_COLUMNS - set(df.columns)
-    if missing:
+    "Initial Holdings" rows are converted into synthetic opening BUY transactions
+    dated at each portfolio's StartDate, priced at AvgCostPrice. This lets FIFO
+    cost-basis, daily-position, NAV, and attribution logic work correctly from
+    each portfolio's true inception rather than only from its first *recorded*
+    trade — without this, any position that predates the transaction log would
+    be invisible to the rest of the pipeline (wrong holdings, wrong P&L, wrong
+    NAV/returns).
+
+    Returns:
+        (transactions_df, cashflows_df)
+    """
+    holdings_raw = _find_sheet(sheets, "Initial Holdings", "InitialHoldings", "Holdings")
+    txns_raw = _find_sheet(sheets, "Transactions")
+    cash_raw = _find_sheet(sheets, "Cashflows", "Cash Flows", "CashFlows")
+
+    # ---- Initial Holdings -> synthetic opening BUY transactions ----
+    h = _normalize_columns(holdings_raw)
+    missing_h = REQUIRED_HOLDINGS_COLUMNS - set(h.columns)
+    if missing_h:
         raise TransactionsFormatError(
-            f"Missing required columns: {sorted(missing)}. Found: {sorted(df.columns)}"
+            f"'Initial Holdings' sheet missing columns: {sorted(missing_h)}. Found: {sorted(h.columns)}"
         )
+    h_opening = pd.DataFrame(
+        {
+            "portfolio": h["portfolio"],
+            "date": h["startdate"],
+            "ticker": h["ticker"],
+            "action": "BUY",
+            "quantity": h["quantity"],
+            "price": h["avgcostprice"],
+        }
+    )
 
-    df = df[list(REQUIRED_COLUMNS)].copy()
-    df["portfolio"] = df["portfolio"].astype(str).str.strip()
-    df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
-    df["action"] = df["action"].astype(str).str.strip().str.upper()
+    # ---- Transactions ----
+    t = _normalize_columns(txns_raw)
+    missing_t = REQUIRED_COLUMNS - set(t.columns)
+    if missing_t:
+        raise TransactionsFormatError(
+            f"'Transactions' sheet missing columns: {sorted(missing_t)}. Found: {sorted(t.columns)}"
+        )
+    t = t[list(REQUIRED_COLUMNS)].copy()
 
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
-    df["date"] = df["date"].dt.normalize()
+    combined = pd.concat([h_opening, t], ignore_index=True, sort=False)
 
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df = df.dropna(subset=["quantity", "price"])
+    combined["portfolio"] = combined["portfolio"].astype(str).str.strip()
+    combined["ticker"] = combined["ticker"].astype(str).str.strip().str.upper()
+    combined["action"] = combined["action"].astype(str).str.strip().str.upper()
 
-    df["signed_qty"] = np.where(df["action"] == "BUY", df["quantity"], -df["quantity"])
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+    combined = combined.dropna(subset=["date"])
+    combined["date"] = combined["date"].dt.normalize()
 
-    df["ticker_yf"] = (
-        df["ticker"]
+    combined["quantity"] = pd.to_numeric(combined["quantity"], errors="coerce")
+    combined["price"] = pd.to_numeric(combined["price"], errors="coerce")
+    combined = combined.dropna(subset=["quantity", "price"])
+
+    combined["signed_qty"] = np.where(combined["action"] == "BUY", combined["quantity"], -combined["quantity"])
+
+    combined["ticker_yf"] = (
+        combined["ticker"]
         .astype(str)
         .str.upper()
         .str.strip()
         .map(TICKER_MAP)
-        .fillna(df["ticker"].astype(str).str.upper().str.strip() + ".NS")
+        .fillna(combined["ticker"].astype(str).str.upper().str.strip() + ".NS")
     )
 
-    return df.sort_values(["portfolio", "date", "ticker_yf"]).reset_index(drop=True)
+    combined = combined.sort_values(["portfolio", "date", "ticker_yf"]).reset_index(drop=True)
+
+    # ---- Cashflows ----
+    c = _normalize_columns_basic(cash_raw)
+    missing_c = REQUIRED_CASHFLOW_COLUMNS - set(c.columns)
+    if missing_c:
+        raise TransactionsFormatError(
+            f"'Cashflows' sheet missing columns: {sorted(missing_c)}. Found: {sorted(c.columns)}"
+        )
+    c = c[list(REQUIRED_CASHFLOW_COLUMNS)].copy()
+    c["portfolio"] = c["portfolio"].astype(str).str.strip()
+    c["date"] = pd.to_datetime(c["date"], errors="coerce")
+    c = c.dropna(subset=["date"])
+    c["date"] = c["date"].dt.normalize()
+    c["amount"] = pd.to_numeric(c["amount"], errors="coerce")
+    c = c.dropna(subset=["amount"])
+    c = c.sort_values(["portfolio", "date"]).reset_index(drop=True)
+
+    return combined, c
+
+
+def cashflow_summary(cashflows_df: pd.DataFrame) -> pd.Series:
+    """Total net cash contributed per portfolio (sum of Cashflows.Amount)."""
+    if cashflows_df is None or cashflows_df.empty:
+        return pd.Series(dtype=float)
+    return cashflows_df.groupby("portfolio")["amount"].sum().sort_values(ascending=False)
 
 
 def current_positions(df: pd.DataFrame) -> pd.DataFrame:
@@ -232,22 +337,6 @@ def bse_ticker_from_ns(ticker_ns: str) -> str:
     base = ticker_ns.replace(".NS", "")
     base = BSE_OVERRIDE.get(base, base)
     return f"{base}.BO"
-
-
-def portfolio_returns(nav_df: pd.DataFrame) -> pd.DataFrame:
-    # Simple pct_change on NAV — kept for backward compat.
-    # NOTE: use build_twr_returns for accurate time-weighted returns.
-    nav = nav_df.copy()
-    for col in nav.columns:
-        s = pd.to_numeric(nav[col], errors="coerce")
-        idx = s[s > 0].index
-        if len(idx) == 0:
-            nav[col] = np.nan
-            continue
-        first = idx[0]
-        s.loc[s.index < first] = np.nan
-        nav[col] = s
-    return nav.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
 
 def build_twr_returns(
@@ -337,17 +426,19 @@ def annualized_return_from_twr(twr_returns: pd.Series) -> float:
     return float(cumulative ** (252.0 / n) - 1)
 
 
-def annualized_return_from_nav(nav: pd.Series) -> float:
-    """Legacy: kept for backward compat. Prefer annualized_return_from_twr."""
-    nav = pd.to_numeric(nav, errors="coerce").dropna()
-    nav = nav[nav > 0]
-    if len(nav) < 2:
-        return np.nan
-    n = len(nav) - 1
-    total = float(nav.iloc[-1] / nav.iloc[0] - 1)
-    if (1 + total) <= 0 or n <= 0:
-        return np.nan
-    return float((1 + total) ** (252 / n) - 1)
+def cumulative_growth_from_twr(twr_returns: pd.Series) -> pd.Series:
+    """
+    Growth-of-₹1 index built purely from daily TWR returns (no NAV/dollar value
+    involved). Used for max-drawdown and the PDF growth chart. Because it's
+    built from TWR (which already excludes cash-flow effects), a drawdown
+    computed off this curve reflects actual investment performance — unlike a
+    drawdown computed off raw NAV, which would show a fake "loss" whenever the
+    client simply withdrew cash.
+    """
+    r = pd.to_numeric(twr_returns, errors="coerce").dropna()
+    if r.empty:
+        return pd.Series(dtype=float)
+    return (1 + r).cumprod()
 
 
 def annualized_volatility(returns: pd.Series) -> float:
@@ -443,17 +534,18 @@ def cvar_99(returns: pd.Series) -> float:
 
 
 def portfolio_metrics(
-    nav: pd.Series,
-    benchmark_nav: pd.Series | None = None,
+    twr_returns: pd.Series,
+    benchmark_prices: pd.Series | None = None,
     rf_annual: float = 0.0,
-    twr_returns: pd.Series | None = None,
 ) -> pd.Series:
     """
-    Compute portfolio metrics.
+    Compute portfolio metrics purely from daily Time-Weighted Returns.
 
-    If `twr_returns` is provided, all return/vol/ratio calculations use those
-    time-weighted daily returns (correct when the portfolio has cash flows).
-    Otherwise falls back to nav.pct_change() which over-estimates returns.
+    No NAV/dollar-value series is used anywhere here — annualized return,
+    volatility, Sharpe, Sortino, beta/alpha/Treynor, CVaR, and max drawdown
+    are all derived from `twr_returns` (and, for beta/alpha/Treynor, from
+    `benchmark_prices` converted to its own daily returns). This keeps every
+    metric immune to cash inflows/outflows, since TWR already excludes them.
     """
     _empty = pd.Series(
         {
@@ -469,15 +561,7 @@ def portfolio_metrics(
         }
     )
 
-    nav = pd.to_numeric(nav, errors="coerce").where(lambda s: s > 0).dropna()
-    if len(nav) < 2:
-        return _empty
-
-    if twr_returns is not None:
-        rets = pd.to_numeric(twr_returns, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-    else:
-        rets = nav.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
-
+    rets = pd.to_numeric(twr_returns, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     if len(rets) < 2:
         return _empty
 
@@ -485,14 +569,12 @@ def portfolio_metrics(
     ann_vol = annualized_volatility(rets)
     sharpe = (ann_ret - rf_annual) / ann_vol if ann_vol and ann_vol > 0 and not pd.isna(ann_ret) else np.nan
 
-    # Max drawdown: compute from the NAV series (not TWR cumprod) so rebalancing
-    # gaps don't create fake -100% drawdowns.
-    nav_clean = pd.to_numeric(nav, errors="coerce").dropna()
-    nav_clean = nav_clean[nav_clean > 0]
-    if len(nav_clean) >= 2:
-        rolling_max = nav_clean.cummax()
-        dd_series = nav_clean / rolling_max - 1
-        max_dd = float(dd_series.min())
+    # Max drawdown: from the TWR growth-of-₹1 curve, not raw NAV — a cash
+    # withdrawal should never show up as a "drawdown".
+    growth = cumulative_growth_from_twr(rets)
+    if len(growth) >= 2:
+        dd_series = drawdown_series(growth)
+        max_dd = float(dd_series.min()) if not dd_series.empty else np.nan
     else:
         max_dd = np.nan
 
@@ -508,56 +590,15 @@ def portfolio_metrics(
         "Max Drawdown": max_dd,
     }
 
-    if benchmark_nav is not None:
-        bnav = pd.to_numeric(benchmark_nav, errors="coerce").dropna()
-        if len(bnav) >= 2:
-            b_rets = bnav.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if benchmark_prices is not None:
+        bprices = pd.to_numeric(benchmark_prices, errors="coerce").dropna()
+        if len(bprices) >= 2:
+            b_rets = bprices.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
             out["Beta (Nifty 500)"] = beta_to_benchmark(rets, b_rets)
             out["Jensen Alpha"] = jensen_alpha(rets, b_rets, rf_annual=rf_annual)
             out["Treynor"] = treynor_ratio(rets, b_rets, rf_annual=rf_annual)
 
     return pd.Series(out)
-
-
-def portfolio_stats(returns: pd.Series) -> pd.Series:
-    returns = pd.to_numeric(returns, errors="coerce").dropna()
-    if returns.empty or len(returns) < 2:
-        return pd.Series(
-            {
-                "Annual Return": np.nan,
-                "Volatility": np.nan,
-                "Sharpe Ratio": np.nan,
-                "Max Drawdown": np.nan,
-            }
-        )
-
-    # Use geometric annualization from cumulative return when possible.
-    n = len(returns)
-    cumulative = (1 + returns).cumprod()
-    total_return = float(cumulative.iloc[-1] - 1)
-    annual_return = float((1 + total_return) ** (252 / n) - 1) if n > 0 and (1 + total_return) > 0 else np.nan
-    volatility = returns.std(ddof=1) * np.sqrt(252)
-    sharpe = annual_return / volatility if volatility and volatility > 0 else np.nan
-    rolling_max = cumulative.cummax()
-    drawdown = cumulative / rolling_max - 1
-    max_dd = drawdown.min()
-
-    return pd.Series(
-        {
-            "Annual Return": annual_return,
-            "Volatility": volatility,
-            "Sharpe Ratio": sharpe,
-            "Max Drawdown": max_dd,
-        }
-    )
-
-
-def stats_table(portfolio_returns_df: pd.DataFrame) -> pd.DataFrame:
-    # Backward-compat helper (kept), but prefer `portfolio_metrics(...)` for richer stats.
-    stats = portfolio_returns_df.apply(portfolio_stats).T
-    if "Annual Return" in stats.columns:
-        stats = stats.sort_values("Annual Return", ascending=False)
-    return stats
 
 
 @dataclass(frozen=True)
@@ -635,8 +676,27 @@ def download_prices(
     return DownloadResult(prices=prices, successful_mappings=successful, failed_tickers=failed)
 
 
-def build_daily_positions(df: pd.DataFrame, prices_index: pd.Index) -> dict[str, pd.DataFrame]:
+def build_daily_positions(
+    df: pd.DataFrame, prices_index: pd.Index
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """
+    Returns (daily_positions, oversold_warnings).
+
+    daily_positions[portfolio] is a date x ticker_yf quantity DataFrame, clipped
+    at zero: this is a long-only equity tracker, so a SELL that exceeds the
+    quantity actually on record (e.g. a stock sold that was never recorded as
+    bought — missing from both "Initial Holdings" and prior "Transactions" rows)
+    must NOT be allowed to push the running position negative. An unclipped
+    cumulative sum would let that single bad row silently flip the portfolio's
+    NAV negative and corrupt every downstream return/risk metric.
+
+    oversold_warnings lists every (portfolio, ticker, date, oversold qty) where
+    this clipping kicked in, so the data gap can be surfaced to the user instead
+    of silently swallowed — it almost always means the sold position was opened
+    before the tracked history begins and belongs in "Initial Holdings".
+    """
     daily_positions: dict[str, pd.DataFrame] = {}
+    warnings_rows: list[dict] = []
 
     for portfolio in sorted(df["portfolio"].unique().tolist()):
         temp = df[df["portfolio"] == portfolio].copy()
@@ -650,45 +710,43 @@ def build_daily_positions(df: pd.DataFrame, prices_index: pd.Index) -> dict[str,
             .fillna(0)
         )
 
-        holdings = txn.cumsum()
-        holdings = holdings.reindex(prices_index).ffill().fillna(0)
+        raw_cumsum = txn.cumsum()
+        clipped = raw_cumsum.clip(lower=0)
+
+        went_negative = raw_cumsum < 0
+        if went_negative.to_numpy().any():
+            for ticker in txn.columns:
+                neg_dates = raw_cumsum.index[went_negative[ticker]]
+                if len(neg_dates) == 0:
+                    continue
+                first_neg_date = neg_dates[0]
+                oversold_qty = float(-raw_cumsum.loc[first_neg_date, ticker])
+                warnings_rows.append(
+                    {
+                        "portfolio": portfolio,
+                        "ticker_yf": ticker,
+                        "date": first_neg_date,
+                        "oversold_qty": round(oversold_qty, 4),
+                    }
+                )
+
+        holdings = clipped.reindex(prices_index).ffill().fillna(0)
         daily_positions[str(portfolio)] = holdings
 
-    return daily_positions
+    oversold_warnings = (
+        pd.DataFrame(warnings_rows)
+        if warnings_rows
+        else pd.DataFrame(columns=["portfolio", "ticker_yf", "date", "oversold_qty"])
+    )
+    return daily_positions, oversold_warnings
 
 
-def build_nav_df(daily_positions: dict[str, pd.DataFrame], prices: pd.DataFrame) -> tuple[pd.DataFrame, set[str]]:
-    """
-    Compute daily portfolio NAV (market value of holdings).
-
-    On days where the portfolio is fully cash / mid-rebalancing (all holdings = 0),
-    the raw NAV would be zero which breaks charts and metrics.  We forward-fill
-    the last valid NAV through such gaps so the NAV curve stays smooth.
-    """
-    nav_df = pd.DataFrame(index=prices.index)
-    missing_tickers: set[str] = set()
-
-    for portfolio, holdings in daily_positions.items():
-        available = [t for t in holdings.columns if t in prices.columns]
-        missing_tickers.update(set(holdings.columns) - set(available))
-        if not available:
-            nav_df[portfolio] = np.nan
-            continue
-
-        raw_nav = (holdings[available] * prices[available]).sum(axis=1)
-
-        # Replace zero/near-zero NAV with NaN then forward-fill so rebalancing
-        # gaps don't appear as crashes in the NAV chart.
-        # Only do this AFTER the portfolio's first real position.
-        first_pos = (holdings[available] > 0).any(axis=1).idxmax() if (holdings[available] > 0).any(axis=1).any() else None
-        if first_pos is not None:
-            raw_nav.loc[raw_nav.index < first_pos] = np.nan
-            # Forward-fill zeros that occur mid-portfolio (rebalancing gaps)
-            raw_nav = raw_nav.replace(0, np.nan).ffill()
-
-        nav_df[portfolio] = raw_nav
-
-    return nav_df, missing_tickers
+def missing_price_tickers(daily_positions: dict[str, pd.DataFrame], prices: pd.DataFrame) -> set[str]:
+    """Tickers that appear in someone's holdings but have no downloaded price series."""
+    missing: set[str] = set()
+    for holdings in daily_positions.values():
+        missing.update(set(holdings.columns) - set(prices.columns))
+    return missing
 
 
 def compute_pnl(df: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
@@ -761,18 +819,39 @@ def compute_pnl(df: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results).set_index("portfolio")
 
 
-def drawdown_series(nav: pd.Series) -> pd.Series:
-    nav = nav.dropna()
-    if nav.empty:
+def drawdown_series(value_series: pd.Series) -> pd.Series:
+    """
+    Generic peak-to-trough drawdown of any monotonic-ish value series.
+
+    Feed this a TWR growth-of-₹1 curve (`cumulative_growth_from_twr`) for a
+    performance drawdown — never raw NAV, which would register a client
+    withdrawal as a "drawdown" even when nothing was actually lost.
+    """
+    value_series = value_series.dropna()
+    if value_series.empty:
         return pd.Series(dtype=float)
-    rolling_max = nav.cummax()
-    return nav / rolling_max - 1
+    rolling_max = value_series.cummax()
+    return value_series / rolling_max - 1
 
 
 def performance_attribution(holdings: pd.DataFrame, prices: pd.DataFrame) -> pd.Series:
     """
-    Simple attribution like the notebook:
-    sum over time of (yesterday weights * today returns) per ticker.
+    Per-ticker contribution to total portfolio return: for each day, the
+    prior day's portfolio weight of a ticker times that ticker's return that
+    day, summed over the whole period.
+
+        contribution_i = sum_t( weight_i(t-1) * stock_return_i(t) )
+
+    This is standard daily-rebalanced ("arithmetic") return attribution: the
+    sum of all tickers' contributions approximates total portfolio return
+    (it won't match exactly — compounding cross-terms are the difference —
+    but it should be close; a large gap signals a data problem, e.g. a
+    ticker with a bad price series).
+
+    `holdings` must already be non-negative (see build_daily_positions,
+    which clips at zero) — a phantom negative holding would flip the sign
+    of that ticker's weight and silently corrupt every other ticker's
+    contribution too, since weights are normalized by total portfolio value.
     """
     tickers = [t for t in holdings.columns if t in prices.columns]
     if not tickers:
@@ -781,12 +860,41 @@ def performance_attribution(holdings: pd.DataFrame, prices: pd.DataFrame) -> pd.
     portfolio_prices = prices[tickers]
     stock_returns = portfolio_prices.pct_change().fillna(0)
 
-    holdings_aligned = holdings[tickers].reindex(stock_returns.index).ffill()
-    portfolio_value = (holdings_aligned * portfolio_prices).sum(axis=1)
-    weights = holdings_aligned.multiply(portfolio_prices).div(portfolio_value, axis=0).fillna(0)
+    holdings_aligned = holdings[tickers].reindex(stock_returns.index).ffill().fillna(0)
+    # Market value of the portfolio's price-covered holdings, day by day —
+    # used only to normalize weights below, never displayed as "NAV".
+    market_value = (holdings_aligned * portfolio_prices).sum(axis=1)
+    weights = holdings_aligned.multiply(portfolio_prices).div(market_value, axis=0).fillna(0)
 
-    contribution = (weights.shift(1) * stock_returns).sum().sort_values(ascending=False)
+    contribution = (weights.shift(1).fillna(0) * stock_returns).sum().sort_values(ascending=False)
     return contribution
+
+
+def attribution_reconciliation(
+    holdings: pd.DataFrame, prices: pd.DataFrame, twr_returns: pd.Series
+) -> dict[str, float]:
+    """
+    Sanity check for performance_attribution: compares the sum of all
+    per-ticker contributions against the portfolio's actual cumulative TWR
+    return over the same window. A small gap is expected (arithmetic vs.
+    compounded return); a large one usually means a price or holdings issue.
+    """
+    attrib = performance_attribution(holdings, prices)
+    contribution_total = float(attrib.sum()) if not attrib.empty else np.nan
+
+    r = pd.to_numeric(twr_returns, errors="coerce").dropna()
+    actual_total = float((1 + r).prod() - 1) if len(r) >= 1 else np.nan
+
+    gap = (
+        float(contribution_total - actual_total)
+        if pd.notna(contribution_total) and pd.notna(actual_total)
+        else np.nan
+    )
+    return {
+        "contribution_total": contribution_total,
+        "actual_cumulative_return": actual_total,
+        "gap": gap,
+    }
 
 
 def overlap_matrix(positions_df: pd.DataFrame) -> pd.DataFrame:
