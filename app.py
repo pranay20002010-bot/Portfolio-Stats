@@ -12,17 +12,19 @@ from portfolio_pipeline import (
     BENCHMARK_TICKER,
     SECTOR_MAP,
     TransactionsFormatError,
+    attribution_reconciliation,
     build_daily_positions,
-    build_nav_df,
     build_twr_returns,
+    cashflow_summary,
     compute_pnl,
+    cumulative_growth_from_twr,
     current_positions,
-    drawdown_series,
     download_prices,
+    drawdown_series,
     get_corr_cmap,
     load_transactions_excel,
+    missing_price_tickers,
     performance_attribution,
-    portfolio_returns,
     portfolio_metrics,
     prepare_transactions,
     risk_contribution,
@@ -54,6 +56,16 @@ def _fmt_float(x) -> str:
     if pd.isna(v) or v in (float("inf"), float("-inf")):
         return "N/A"
     return f"{v:,.2f}"
+
+
+def _fmt_inr(x) -> str:
+    try:
+        v = float(x)
+    except Exception:
+        return "N/A"
+    if pd.isna(v):
+        return "N/A"
+    return f"₹{v:,.0f}"
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -176,8 +188,11 @@ if not uploaded:
 
 try:
     excel_bytes = uploaded.getvalue()
-    df_raw = load_transactions_excel(excel_bytes, password=password or None)
-    df = prepare_transactions(df_raw)
+    sheets = load_transactions_excel(excel_bytes, password=password or None)
+    # prepare_transactions reads all three sheets — "Initial Holdings" (seeded as
+    # opening BUY transactions at each portfolio's StartDate), "Transactions"
+    # (the trade log), and "Cashflows" (deposits/withdrawals, kept separate).
+    df, cashflows_df = prepare_transactions(sheets)
 except TransactionsFormatError as e:
     st.error(str(e))
     st.stop()
@@ -197,23 +212,23 @@ if prices.empty:
     st.error("No prices could be downloaded. Check ticker mappings and internet access on the host.")
     st.stop()
 
-daily_positions = build_daily_positions(df, prices.index)
-nav_df, missing_tickers = build_nav_df(daily_positions, prices)
-# TWR returns: price-change-only returns, unaffected by cash inflows/outflows
+daily_positions, oversold_warnings = build_daily_positions(df, prices.index)
+missing_tickers = missing_price_tickers(daily_positions, prices)
+# TWR returns: price-change-only returns, unaffected by cash inflows/outflows.
+# This is the only return series used anywhere in the app — no NAV/dollar-value
+# series is computed or displayed.
 twr_df = build_twr_returns(daily_positions, prices)
-rets = twr_df  # used downstream for per-client returns display
-nav_df.columns = nav_df.columns.astype(str)
 twr_df.columns = twr_df.columns.astype(str)
-rets.columns = rets.columns.astype(str)
+portfolios_all = sorted(str(p) for p in daily_positions.keys())
 
-benchmark_nav = prices[BENCHMARK_TICKER] if include_benchmark and BENCHMARK_TICKER in prices.columns else None
+benchmark_prices = prices[BENCHMARK_TICKER] if include_benchmark and BENCHMARK_TICKER in prices.columns else None
 
 overview_tab, client_tab = st.tabs(["Overview", "Client report"])
 
 with overview_tab:
     st.subheader("Key metrics")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Clients", f"{len(nav_df.columns)}")
+    c1.metric("Clients", f"{len(portfolios_all)}")
     c2.metric("Tickers", f"{len(tickers)}")
     c3.metric("From", f"{df['date'].min().date().isoformat()}")
     c4.metric("To", f"{df['date'].max().date().isoformat()}")
@@ -223,9 +238,9 @@ with overview_tab:
 
     # Compute metrics here so rf_annual slider changes are reflected immediately
     metrics_rows = []
-    for p in nav_df.columns:
-        twr_col = twr_df[p].dropna() if p in twr_df.columns else None
-        m = portfolio_metrics(nav_df[p], benchmark_nav=benchmark_nav, rf_annual=rf_annual, twr_returns=twr_col)
+    for p in portfolios_all:
+        twr_col = twr_df[p].dropna() if p in twr_df.columns else pd.Series(dtype=float)
+        m = portfolio_metrics(twr_col, benchmark_prices=benchmark_prices, rf_annual=rf_annual)
         m.name = str(p)
         metrics_rows.append(m)
     stats = pd.DataFrame(metrics_rows)
@@ -317,6 +332,20 @@ with overview_tab:
         pnl_display.columns = ["Realized P&L", "Unrealized P&L", "Total P&L"]
         st.dataframe(pnl_display, use_container_width=True)
 
+    # ── Cash flows ───────────────────────────────────────────────────────────
+    st.subheader("Cash flows (capital contributed)")
+    if cashflows_df.empty:
+        st.info("No cashflow data found.")
+    else:
+        summary = cashflow_summary(cashflows_df)
+        summary_disp = summary.to_frame("Net cash contributed (₹)")
+        summary_disp["Net cash contributed (₹)"] = summary_disp["Net cash contributed (₹)"].apply(_fmt_inr)
+        st.dataframe(summary_disp, use_container_width=True)
+        st.caption(
+            "Net cash in/out per portfolio from the Cashflows sheet. This is NOT yet folded into NAV — "
+            "NAV and TWR below reflect only the invested equity sleeve, not idle cash sitting in the account."
+        )
+
     st.subheader("Data quality")
     if dl.failed_tickers:
         st.warning(f"Price download failed for {len(dl.failed_tickers)} tickers.")
@@ -324,10 +353,19 @@ with overview_tab:
     if missing_tickers:
         st.warning(f"Holdings contain {len(missing_tickers)} tickers missing from downloaded prices.")
         st.code("\n".join(sorted(missing_tickers)))
+    if not oversold_warnings.empty:
+        st.warning(
+            f"{len(oversold_warnings)} SELL transaction(s) exceed the quantity on record for that ticker "
+            "(clamped to zero rather than allowed to go negative). This almost always means the position "
+            "was opened before the tracked history starts and is missing from 'Initial Holdings'."
+        )
+        warn_disp = oversold_warnings.copy()
+        warn_disp["date"] = pd.to_datetime(warn_disp["date"]).dt.date.astype(str)
+        st.dataframe(warn_disp, use_container_width=True)
     # Market-cap split intentionally omitted (too unreliable across tickers via Yahoo Finance).
 
 with client_tab:
-    portfolios = [c for c in nav_df.columns if c and str(c).strip()]
+    portfolios = portfolios_all
     if not portfolios:
         st.error("No portfolios found in the uploaded data.")
         st.stop()
@@ -339,11 +377,19 @@ with client_tab:
     client_txns = df[df["portfolio"].astype(str).str.strip() == str(portfolio).strip()]
     st.dataframe(client_txns.sort_values("date", ascending=False).reset_index(drop=True), use_container_width=True)
 
-    nav = nav_df[portfolio].dropna()
+    st.subheader("Cash flows")
+    client_cash = cashflows_df[cashflows_df["portfolio"].astype(str).str.strip() == str(portfolio).strip()]
+    if client_cash.empty:
+        st.info("No cashflow records for this client.")
+    else:
+        cash_disp = client_cash.sort_values("date", ascending=False).reset_index(drop=True).copy()
+        cash_disp["amount"] = cash_disp["amount"].apply(_fmt_inr)
+        st.dataframe(cash_disp, use_container_width=True)
+
     pr = twr_df[portfolio].dropna() if portfolio in twr_df.columns else pd.Series(dtype=float)
     corr = None
 
-    client_metrics = portfolio_metrics(nav, benchmark_nav=benchmark_nav, rf_annual=rf_annual, twr_returns=pr if not pr.empty else None)
+    client_metrics = portfolio_metrics(pr, benchmark_prices=benchmark_prices, rf_annual=rf_annual)
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Annualized return", _fmt_pct(client_metrics.get("Annualized Return")))
@@ -357,15 +403,20 @@ with client_tab:
     m4.metric("Treynor", _fmt_float(client_metrics.get("Treynor")))
     m5.metric("99% CVaR (Daily)", _fmt_pct(client_metrics.get("CVaR 99% (Daily)")))
 
+    growth = cumulative_growth_from_twr(pr)
+
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.subheader("NAV")
-        st.line_chart(nav, height=260)
+        st.subheader("Cumulative growth (TWR, growth of ₹1)")
+        if growth.empty:
+            st.info("Not enough return history for a growth chart.")
+        else:
+            st.line_chart(growth, height=260)
     with c2:
         st.subheader("Drawdown")
-        dd = drawdown_series(nav)
+        dd = drawdown_series(growth)
         if dd.empty:
-            st.info("Not enough NAV data for drawdown.")
+            st.info("Not enough return history for drawdown.")
         else:
             import matplotlib.pyplot as plt
             import matplotlib.ticker as mticker
@@ -409,7 +460,7 @@ with client_tab:
         "Choose report",
         [
             "PDF report",
-            "NAV history (CSV)",
+            "Cumulative growth (CSV)",
             "Daily returns (CSV)",
             "Holdings (latest, CSV)",
             "Transactions (this client, CSV)",
@@ -442,6 +493,16 @@ with client_tab:
                 _bar_chart_from_series(rc, title="Risk contribution (top)", value_label="Risk", top_n=12)
             else:
                 st.info("Not enough data for risk contribution.")
+
+        if not pr.empty:
+            recon = attribution_reconciliation(holdings, prices, pr)
+            gap = recon.get("gap")
+            if pd.notna(gap):
+                st.caption(
+                    f"Sum of ticker contributions: {_fmt_pct(recon['contribution_total'])} vs. actual cumulative "
+                    f"return: {_fmt_pct(recon['actual_cumulative_return'])} (gap: {_fmt_pct(gap)}, "
+                    "expected from daily-rebalanced attribution vs. compounded return)."
+                )
 
     st.subheader("Top movers (current holdings only)")
     # Only include tickers that are CURRENTLY held (qty > 0) — not historic positions
@@ -519,14 +580,13 @@ with client_tab:
         st.info("Need at least 2 stocks in this portfolio to show correlation.")
 
     if report_choice == "PDF report":
-        if holdings.empty or nav.empty or pr.empty:
+        if holdings.empty or pr.empty:
             st.warning("Not enough data to generate a PDF report for this client.")
         else:
             try:
                 pdf_bytes = generate_portfolio_pdf_bytes(
                     portfolio_name=str(portfolio),
                     report_date=report_date,
-                    nav=nav,
                     returns=pr,
                     holdings=holdings,
                     prices=prices,
@@ -552,14 +612,14 @@ with client_tab:
                 st.error(f"Failed to build PDF: {e}")
                 st.code(traceback.format_exc())
 
-    elif report_choice == "NAV history (CSV)":
-        out = nav.to_frame(name="nav")
+    elif report_choice == "Cumulative growth (CSV)":
+        out = growth.to_frame(name="growth_of_1_rupee")
         st.download_button(
-            "Download NAV CSV",
+            "Download growth CSV",
             data=_df_to_csv_bytes(out),
-            file_name=f"NAV_{portfolio}.csv",
+            file_name=f"Growth_{portfolio}.csv",
             mime="text/csv",
-            key=f"dl_nav_{portfolio}",
+            key=f"dl_growth_{portfolio}",
         )
 
     elif report_choice == "Daily returns (CSV)":
