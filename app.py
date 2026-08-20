@@ -2034,7 +2034,7 @@ def sector_pie_image(holdings: pd.DataFrame, prices: pd.DataFrame, sector_map: d
         colors=wedge_colors[: len(exp)],
         textprops={"fontsize": 8.5},
         pctdistance=0.75,
-        labeldistance=1.08,
+        labeldistance=1.10,
     )
     ax.set_title("Sector Exposure", fontsize=11, color="#290084", fontweight="bold")
     ax.set_ylabel("")
