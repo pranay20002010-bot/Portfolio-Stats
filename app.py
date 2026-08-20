@@ -2085,11 +2085,10 @@ def _make_autopct_with_counts(counts: pd.Series):
 
     return _autopct
 
-
 def sector_pie_image(
     holdings: pd.DataFrame,
     prices: pd.DataFrame,
-    sector_map: dict[str, str],
+    sector_map: dict[str, str]
 ) -> Optional[Image]:
     exp, counts = sector_exposure_weights_and_counts(
         holdings, prices, sector_map
@@ -2099,24 +2098,26 @@ def sector_pie_image(
         return None
 
     fig, ax = plt.subplots(figsize=(9, 8))
+
     wedge_colors = plt.cm.tab20.colors
 
     wedges, _, autotexts = ax.pie(
         exp.values,
+        labels=[""] * len(exp),
         autopct=_make_autopct_with_counts(counts),
         startangle=90,
         colors=wedge_colors[:len(exp)],
         textprops={"fontsize": 7.5},
         pctdistance=0.68,
-        labels=None,
+        wedgeprops={"linewidth": 0.5, "edgecolor": "white"},
     )
-
-    for autotext in autotexts:
-        autotext.set_fontsize(7.5)
 
     legend_labels = [
         f"{sector} ({weight:.1f}%)"
-        for sector, weight in zip(exp.index, exp.values * 100)
+        for sector, weight in zip(
+            exp.index,
+            exp.values * 100
+        )
     ]
 
     ax.legend(
@@ -2134,7 +2135,7 @@ def sector_pie_image(
         "Sector Exposure",
         fontsize=11,
         color="#290084",
-        fontweight="bold",
+        fontweight="bold"
     )
 
     ax.set_ylabel("")
@@ -2145,9 +2146,8 @@ def sector_pie_image(
     return make_chart_image(
         fig,
         width_mm=130,
-        height_mm=120,
+        height_mm=120
     )
-
 
 def stock_risk_return(attribution: pd.Series, risk_contrib: pd.Series) -> pd.DataFrame:
     """
