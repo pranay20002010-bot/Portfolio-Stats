@@ -188,6 +188,16 @@ SECTOR_MAP: dict[str, str] = {
     "ENRIN.NS": "Energy",
     "RELIANCE.NS": "Energy",
     "QPOWER.NS": "Energy",
+    "BLS.NS": "Travel",
+    "ETERNAL.NS": "Consumer Discretionary",
+    "NYKAA.NS": "Consumer Discretionary",
+    "HINDALCO.NS": "Metals",
+    "ITBEES.NS": "IT",
+    "KARURVYSYA.NS": "BFSI",
+    "SWSOLAR.NS": "Renewable",
+    "TITAN.NS": "Gold",
+    "VENUSPIPES.NS": "Capital Goods",
+    "VIKRAN.NS": "Capital Goods",
 }
 
 
