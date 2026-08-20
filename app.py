@@ -2086,50 +2086,67 @@ def _make_autopct_with_counts(counts: pd.Series):
     return _autopct
 
 
-def sector_pie_image(holdings: pd.DataFrame, prices: pd.DataFrame, sector_map: dict[str, str]) -> Optional[Image]:
-    exp, counts = sector_exposure_weights_and_counts(holdings, prices, sector_map)
+def sector_pie_image(
+    holdings: pd.DataFrame,
+    prices: pd.DataFrame,
+    sector_map: dict[str, str],
+) -> Optional[Image]:
+    exp, counts = sector_exposure_weights_and_counts(
+        holdings, prices, sector_map
+    )
+
     if exp.empty:
         return None
 
     fig, ax = plt.subplots(figsize=(9, 8))
-wedge_colors = plt.cm.tab20.colors
+    wedge_colors = plt.cm.tab20.colors
 
-wedges, _, autotexts = ax.pie(
-    exp.values,
-    autopct=_make_autopct_with_counts(counts),
-    startangle=90,
-    colors=wedge_colors[:len(exp)],
-    textprops={"fontsize": 7.5},
-    pctdistance=0.68,
-)
+    wedges, _, autotexts = ax.pie(
+        exp.values,
+        autopct=_make_autopct_with_counts(counts),
+        startangle=90,
+        colors=wedge_colors[:len(exp)],
+        textprops={"fontsize": 7.5},
+        pctdistance=0.68,
+        labels=None,
+    )
 
-legend_labels = [
-    f"{sector} ({weight:.1f}%)"
-    for sector, weight in zip(exp.index, exp.values * 100)
-]
+    for autotext in autotexts:
+        autotext.set_fontsize(7.5)
 
-ax.legend(
-    wedges,
-    legend_labels,
-    title="Sector",
-    loc="center left",
-    bbox_to_anchor=(1.02, 0.5),
-    frameon=False,
-    fontsize=7.5,
-    title_fontsize=9,
-)
+    legend_labels = [
+        f"{sector} ({weight:.1f}%)"
+        for sector, weight in zip(exp.index, exp.values * 100)
+    ]
 
-ax.set_title(
-    "Sector Exposure",
-    fontsize=11,
-    color="#290084",
-    fontweight="bold"
-)
-ax.set_ylabel("")
-ax.axis("equal")
+    ax.legend(
+        wedges,
+        legend_labels,
+        title="Sector",
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        fontsize=7.5,
+        title_fontsize=9,
+    )
 
-fig.tight_layout()
-return make_chart_image(fig, width_mm=130, height_mm=120)
+    ax.set_title(
+        "Sector Exposure",
+        fontsize=11,
+        color="#290084",
+        fontweight="bold",
+    )
+
+    ax.set_ylabel("")
+    ax.axis("equal")
+
+    fig.tight_layout()
+
+    return make_chart_image(
+        fig,
+        width_mm=130,
+        height_mm=120,
+    )
 
 
 def stock_risk_return(attribution: pd.Series, risk_contrib: pd.Series) -> pd.DataFrame:
