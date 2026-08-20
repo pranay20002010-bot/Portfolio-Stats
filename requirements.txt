@@ -1,0 +1,15 @@
+streamlit>=1.45
+pandas>=2.0
+numpy>=1.26
+# Pinned below 1.0: yfinance 1.x (released Aug 2026) is a breaking major
+# version change from the 0.2.x line this app is written against. An
+# unbounded ">=0.2" pulls the newest 1.x release on a fresh install, which
+# is a likely cause of systemic price-download failures (even for highly
+# liquid tickers) that don't clear up with retries. Test against 1.x
+# deliberately before lifting this ceiling.
+yfinance>=0.2.40,<1.0
+openpyxl>=3.1
+reportlab>=4.0
+matplotlib>=3.8
+msoffcrypto-tool>=5.1
+python-pptx>=1.0
