@@ -76,7 +76,7 @@ def get_corr_cmap():
 TICKER_MAP: dict[str, str] = {
     # corrections
     "QPOWER": "QPOWER.NS",
-    "APARINDS": "APARIND.NS",
+    "APARINDS": "APARINDS.NS",
     # explicit mappings
     "SAGILITY": "SAGILITY.NS",
     "TDPOWERSYS": "TDPOWERSYS.NS",
@@ -101,55 +101,55 @@ BENCHMARKS: dict[str, str] = {"Nifty 50": BENCHMARK_NIFTY50_TICKER, "Nifty 500":
 
 SECTOR_MAP: dict[str, str] = {
     # Financials
-    "ABCAPITAL.NS": "Financials",
-    "FEDERALBNK.NS": "Financials",
-    "SHRIRAMFIN.NS": "Financials",
+    "ABCAPITAL.NS": "BFSI",
+    "FEDERALBNK.NS": "BFSI",
+    "SHRIRAMFIN.NS": "BFSI",
     # Industrials / Capital Goods
-    "LT.NS": "Industrials",
-    "KPIL.NS": "Industrials",
-    "ELECON.NS": "Industrials",
-    "TRITURBINE.NS": "Industrials",
-    "INOXWIND.NS": "Industrials",
-    "GENUSPOWER.NS": "Industrials",
-    "TDPOWERSYS.NS": "Industrials",
-    "SHAKTIPUMP.NS": "Industrials",
-    "WABAG.NS": "Industrials",
-    "APLAPOLLO.NS": "Industrials",
+    "LT.NS": "Capital Goods",
+    "KPIL.NS": "Capital Goods",
+    "ELECON.NS": "Capital Goods",
+    "TRITURBINE.NS": "Capital Goods",
+    "INOXWIND.NS": "Renewable",
+    "GENUSPOWER.NS": "Capital Goods",
+    "TDPOWERSYS.NS": "Capital Goods",
+    "SHAKTIPUMP.NS": "Capital Goods",
+    "WABAG.NS": "Capital Goods",
+    "APLAPOLLO.NS": "Steel",
     # Consumer
-    "VBL.NS": "Consumer",
-    "NESTLEIND.NS": "Consumer",
-    "TRAVELFOOD.NS": "Consumer",
+    "VBL.NS": "FMCG",
+    "NESTLEIND.NS": "FMCG",
+    "TRAVELFOOD.NS": "FMCG",
     # Real Estate / REIT
     "GODREJPROP.NS": "Real Estate",
     "MINDSPACE-RR.NS": "Real Estate",
     # Healthcare / Pharma
-    "LAURUSLABS.NS": "Healthcare",
+    "LAURUSLABS.NS": "Pharma",
     "NAVINFLUOR.NS": "Chemicals",
-    "EMCURE.NS": "Healthcare",
-    "SAGILITY.NS": "Healthcare",
+    "EMCURE.NS": "Pharma",
+    "SAGILITY.NS": "IT",
     # Chemicals / Materials
-    "GRAVITA.NS": "Materials",
+    "GRAVITA.NS": "Recycling",
     "GALAXYSURF.NS": "Chemicals",
-    "APARIND.NS": "Industrials",
+    "APARIND.NS": "Capital Goods",
     # Metals
     "NATIONALUM.NS": "Metals",
     # Technology / Electronics
-    "DIXON.NS": "Technology",
-    "NETWEB.NS": "Technology",
+    "DIXON.NS": "Consumer Durables",
+    "NETWEB.NS": "IT",
     # Defence
     "MODEFENCE.NS": "Defence",
     # FMCG / Agri
-    "CCL.NS": "Consumer",
+    "CCL.NS": "FMCG",
     # Energy / Renewables
-    "WAAREEENER.NS": "Energy",
+    "WAAREEENER.NS": "Renewable",
     # Misc
-    "MANORAMA.NS": "Consumer",
+    "MANORAMA.NS": "FMCG",
     "NH.NS": "Healthcare",
-    "ULTRACEMCO.NS": "Materials",
-    "SAILIFE.NS": "Healthcare",
-    "LGEINDIA.NS": "Consumer",
-    "SETL.NS": "Industrials",
-    "SCHAEFFLER.NS": "Industrials",
+    "ULTRACEMCO.NS": "Cement",
+    "SAILIFE.NS": "Pharma",
+    "LGEINDIA.NS": "Consumer Durables",
+    "SETL.NS": "Capital Goods",
+    "SCHAEFFLER.NS": "Auto Ancillary",
     "ENRIN.NS": "Energy",
     "QPOWER.NS": "Energy",
 }
