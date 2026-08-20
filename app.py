@@ -195,7 +195,7 @@ SECTOR_MAP: dict[str, str] = {
     "ITBEES.NS": "IT",
     "KARURVYSYA.NS": "BFSI",
     "SWSOLAR.NS": "Renewable",
-    "TITAN.NS": "Gold",
+    "TITAN.NS": "Jewellery",
     "VENUSPIPES.NS": "Capital Goods",
     "VIKRAN.NS": "Capital Goods",
     "CARTRADE.NS": "E-Commerce",
