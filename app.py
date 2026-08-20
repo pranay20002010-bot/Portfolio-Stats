@@ -2091,21 +2091,21 @@ def sector_pie_image(holdings: pd.DataFrame, prices: pd.DataFrame, sector_map: d
     if exp.empty:
         return None
 
-    fig, ax = plt.subplots(figsize=(7, 7))
+    fig, ax = plt.subplots(figsize=(9, 8))
     wedge_colors = plt.cm.tab20.colors
     exp.plot.pie(
         ax=ax,
         autopct=_make_autopct_with_counts(counts),
         startangle=90,
         colors=wedge_colors[: len(exp)],
-        textprops={"fontsize": 8.5},
-        pctdistance=0.75,
-        labeldistance=1.08,
+        textprops={"fontsize": 7.5},
+        pctdistance=1.00,
+        labeldistance=1.20,
     )
     ax.set_title("Sector Exposure", fontsize=11, color="#290084", fontweight="bold")
     ax.set_ylabel("")
     fig.tight_layout()
-    return make_chart_image(fig, width_mm=125, height_mm=118)
+    return make_chart_image(fig, width_mm=130, height_mm=120)
 
 
 def stock_risk_return(attribution: pd.Series, risk_contrib: pd.Series) -> pd.DataFrame:
