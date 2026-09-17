@@ -221,6 +221,11 @@ SECTOR_MAP: dict[str, str] = {
     "JYOTICNC.NS": "Capital Goods",
     "TIINDIA.NS": "Auto",
     "JIOFIN.NS": "BFSI",
+    "KIMS.NS": "Healthcare",
+    "EXIDEIND.NS": "Auto Ancillary",
+    "M&M.NS": "Auto",
+    "APOLLO.NS": "Defence",
+    "SEDEMAC.NS": "Auto Ancillary", 
 }
 
 
