@@ -101,6 +101,7 @@ ETF_TICKERS: set[str] = {
     "GOLDBEES.NS",
     "SILVERBEES.NS",
     "MODEFENCE.NS",
+    "ABSLLIQUID.NS",
 }
 
 REIT_TICKERS: set[str] = {
